@@ -1,4 +1,11 @@
-use std::path::PathBuf;
+use std::{
+    collections::VecDeque,
+    fs,
+    io::{BufWriter, Read, Write},
+    path::PathBuf,
+    sync::mpsc::{self, Receiver, TryRecvError},
+    thread,
+};
 
 use eframe::egui::{self, Color32, Frame, RichText, Rounding, Stroke, TextureHandle, Vec2};
 use rfd::FileDialog;
@@ -6,8 +13,8 @@ use rfd::FileDialog;
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1_200.0, 650.0])
-            .with_min_inner_size([1_200.0, 650.0]),
+            .with_inner_size([1_340.0, 700.0])
+            .with_min_inner_size([1_340.0, 700.0]),
         ..Default::default()
     };
 
@@ -20,19 +27,23 @@ fn main() -> eframe::Result<()> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InsertOption {
-    One,
-    Two,
-    Three,
-    Four,
+    Basic,
+    Vertical,
+    Horizontal,
+    TwoDimensional,
+    MultilayerOneDimensional,
+    MultilayerTwoDimensional,
 }
 
 impl InsertOption {
     fn label(self) -> &'static str {
         match self {
-            Self::One => "OPTION 1",
-            Self::Two => "OPTION 2",
-            Self::Three => "OPTION 3",
-            Self::Four => "OPTION 4",
+            Self::Basic => "BASIC",
+            Self::Vertical => "VERTICAL",
+            Self::Horizontal => "HORIZONTAL",
+            Self::TwoDimensional => "TWO DIMENSIONAL",
+            Self::MultilayerOneDimensional => "MULTILAYER 1D",
+            Self::MultilayerTwoDimensional => "MULTILAYER 2D",
         }
     }
 }
@@ -49,9 +60,13 @@ struct Pb2ImgApp {
     x_offset: String,
     y_offset: String,
     attach_to: String,
+    draw_in_front: bool,
+    spawn_shadows: bool,
     option: InsertOption,
     x_progress: f32,
     y_progress: f32,
+    processing: bool,
+    worker: Option<Receiver<WorkerMessage>>,
     preview: Option<TextureHandle>,
     status: String,
 }
@@ -84,9 +99,13 @@ impl Pb2ImgApp {
             x_offset: "0".into(),
             y_offset: "0".into(),
             attach_to: String::new(),
-            option: InsertOption::One,
-            x_progress: 0.5,
-            y_progress: 0.5,
+            draw_in_front: true,
+            spawn_shadows: false,
+            option: InsertOption::Basic,
+            x_progress: 0.0,
+            y_progress: 0.0,
+            processing: false,
+            worker: None,
             preview: None,
             status: "Select an image and a PB2 XML file to begin.".into(),
         }
@@ -98,6 +117,20 @@ impl Pb2ImgApp {
             .pick_file();
 
         if let Some(path) = selected {
+            match image::image_dimensions(&path) {
+                Ok((width, height)) if width as u64 * height as u64 > MAX_IMAGE_PIXELS => {
+                    self.status = format!(
+                        "Image is {width}×{height}; the maximum supported size is {} pixels.",
+                        MAX_IMAGE_PIXELS
+                    );
+                    return;
+                }
+                Err(error) => {
+                    self.status = format!("Could not read image dimensions: {error}");
+                    return;
+                }
+                _ => {}
+            }
             self.image_path = path.display().to_string();
             match load_texture(ctx, &path) {
                 Ok(texture) => {
@@ -115,7 +148,7 @@ impl Pb2ImgApp {
             .pick_file()
         {
             self.xml_path = path.display().to_string();
-            match std::fs::read_to_string(&path) {
+            match read_viewer_content(&path) {
                 Ok(content) => {
                     self.xml_content = content;
                     self.status = "PB2 XML file loaded.".into();
@@ -128,33 +161,116 @@ impl Pb2ImgApp {
         }
     }
 
+    fn settings(&self) -> Result<InsertSettings, String> {
+        let parse_i32 = |label: &str, value: &str| {
+            value
+                .trim()
+                .parse::<i32>()
+                .map_err(|_| format!("{label} must be a whole number."))
+        };
+        let parse_u32 = |label: &str, value: &str| {
+            value
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| format!("{label} must be a positive whole number."))
+        };
+
+        let pixel_width = parse_u32("Pixel X size", &self.pixel_x_size)?;
+        let pixel_height = parse_u32("Pixel Y size", &self.pixel_y_size)?;
+        if pixel_width == 0 || pixel_height == 0 {
+            return Err("Pixel X size and Pixel Y size must be greater than zero.".into());
+        }
+
+        Ok(InsertSettings {
+            pixel_width,
+            pixel_height,
+            x_position: parse_i32("X position", &self.x_position)?,
+            y_position: parse_i32("Y position", &self.y_position)?,
+            material: parse_material(&self.background)?,
+            x_offset: parse_i32("X offset", &self.x_offset)?,
+            y_offset: parse_i32("Y offset", &self.y_offset)?,
+            attach_to: (!self.attach_to.trim().is_empty())
+                .then(|| self.attach_to.trim().to_owned()),
+            draw_in_front: self.draw_in_front,
+            spawn_shadows: self.spawn_shadows,
+        })
+    }
+
     fn required_fields_are_defined(&self) -> bool {
-        [
-            &self.image_path,
-            &self.xml_path,
-            &self.pixel_x_size,
-            &self.pixel_y_size,
-            &self.x_position,
-            &self.y_position,
-            &self.background,
-            &self.x_offset,
-            &self.y_offset,
-        ]
-        .iter()
-        .all(|value| !value.trim().is_empty())
+        !self.image_path.trim().is_empty()
+            && !self.xml_path.trim().is_empty()
+            && self.settings().is_ok()
     }
 
     fn insert_image(&mut self) {
-        if !self.required_fields_are_defined() {
-            self.status = "Complete all required image and placement fields first.".into();
+        let settings = match self.settings() {
+            Ok(settings) => settings,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        let (sender, receiver) = mpsc::channel();
+        let image_path = self.image_path.clone();
+        let xml_path = self.xml_path.clone();
+        let option = self.option;
+
+        self.processing = true;
+        self.worker = Some(receiver);
+        self.x_progress = 0.0;
+        self.y_progress = 0.0;
+        self.status = "Loading image and starting conversion…".into();
+        thread::spawn(move || {
+            convert_image_in_background(image_path, xml_path, settings, option, sender)
+        });
+    }
+
+    fn poll_worker(&mut self) {
+        let Some(receiver) = &self.worker else {
             return;
+        };
+        loop {
+            match receiver.try_recv() {
+                Ok(WorkerMessage::Progress { x, y }) => {
+                    self.x_progress = x;
+                    self.y_progress = y;
+                }
+                Ok(WorkerMessage::Finished { count, path }) => {
+                    self.processing = false;
+                    self.worker = None;
+                    self.x_progress = 1.0;
+                    self.y_progress = 1.0;
+                    self.xml_content = read_viewer_content(&path).unwrap_or_else(|error| {
+                        format!("Objects were appended, but the viewer could not refresh: {error}")
+                    });
+                    self.status = format!("Appended {count} background object(s).");
+                    break;
+                }
+                Ok(WorkerMessage::Failed(error)) => {
+                    self.processing = false;
+                    self.worker = None;
+                    self.status = error;
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.processing = false;
+                    self.worker = None;
+                    self.status = "Conversion worker stopped unexpectedly.".into();
+                    break;
+                }
+            }
         }
-        self.status = format!("Ready to insert using {}.", self.option.label());
     }
 }
 
 impl eframe::App for Pb2ImgApp {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.poll_worker();
+        if self.processing {
+            ctx.request_repaint();
+        }
+
         egui::CentralPanel::default()
             .frame(
                 Frame::none()
@@ -190,7 +306,8 @@ impl eframe::App for Pb2ImgApp {
                             option_controls(ui, self, controls_width);
                             ui.add_space(16.0);
                             ui.horizontal(|ui| {
-                                let can_insert = self.required_fields_are_defined();
+                                let can_insert =
+                                    !self.processing && self.required_fields_are_defined();
                                 if ui
                                     .add_enabled_ui(can_insert, |ui| {
                                         ui.add_sized(
@@ -210,6 +327,17 @@ impl eframe::App for Pb2ImgApp {
                                 ui.label(
                                     RichText::new(&self.status)
                                         .color(Color32::from_rgb(161, 188, 222)),
+                                );
+                                if self.processing {
+                                    ui.spinner();
+                                }
+                                ui.label(
+                                    RichText::new(format!(
+                                        "X {:>3.0}%  Y {:>3.0}%",
+                                        self.x_progress * 100.0,
+                                        self.y_progress * 100.0
+                                    ))
+                                    .color(Color32::from_rgb(161, 188, 222)),
                                 );
                             });
                             ui.add_space(10.0);
@@ -274,7 +402,7 @@ fn placement_controls(ui: &mut egui::Ui, app: &mut Pb2ImgApp, controls_width: f3
             placement_field(ui, "X position", &mut app.x_position, field_width);
             placement_field(ui, "Y position", &mut app.y_position, field_width);
             ui.end_row();
-            placement_field(ui, "Background", &mut app.background, field_width);
+            material_field(ui, &mut app.background, field_width);
             placement_field(ui, "Attach to", &mut app.attach_to, field_width);
             ui.end_row();
             placement_field(ui, "X offset", &mut app.x_offset, field_width);
@@ -286,6 +414,20 @@ fn placement_controls(ui: &mut egui::Ui, app: &mut Pb2ImgApp, controls_width: f3
 fn placement_field(ui: &mut egui::Ui, label: &str, value: &mut String, field_width: f32) {
     ui.vertical(|ui| {
         ui.label(RichText::new(label).color(label_color()));
+        ui.add_sized([field_width, 26.0], dark_text_edit(value));
+    });
+}
+
+fn material_field(ui: &mut egui::Ui, value: &mut String, field_width: f32) {
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Background").color(label_color()));
+            ui.label(
+                RichText::new(format!("Material: {}", material_name(value)))
+                    .small()
+                    .color(Color32::from_rgb(142, 165, 198)),
+            );
+        });
         ui.add_sized([field_width, 26.0], dark_text_edit(value));
     });
 }
@@ -340,12 +482,14 @@ fn xml_content_viewer(ui: &mut egui::Ui, content: &mut String, controls_width: f
 
 fn option_controls(ui: &mut egui::Ui, app: &mut Pb2ImgApp, controls_width: f32) {
     section_title(ui, "INSERT MODE");
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for option in [
-            InsertOption::One,
-            InsertOption::Two,
-            InsertOption::Three,
-            InsertOption::Four,
+            InsertOption::Basic,
+            InsertOption::Vertical,
+            InsertOption::Horizontal,
+            InsertOption::TwoDimensional,
+            InsertOption::MultilayerOneDimensional,
+            InsertOption::MultilayerTwoDimensional,
         ] {
             ui.radio_value(
                 &mut app.option,
@@ -353,6 +497,16 @@ fn option_controls(ui: &mut egui::Ui, app: &mut Pb2ImgApp, controls_width: f32) 
                 RichText::new(option.label()).color(label_color()),
             );
         }
+    });
+    ui.horizontal(|ui| {
+        ui.checkbox(
+            &mut app.draw_in_front,
+            RichText::new("DRAW IN FRONT").color(label_color()),
+        );
+        ui.checkbox(
+            &mut app.spawn_shadows,
+            RichText::new("SPAWN SHADOWS").color(label_color()),
+        );
     });
     ui.add_space(8.0);
     ui.allocate_ui_with_layout(
@@ -375,6 +529,536 @@ fn option_controls(ui: &mut egui::Ui, app: &mut Pb2ImgApp, controls_width: f32) 
             );
         },
     );
+}
+
+enum WorkerMessage {
+    Progress { x: f32, y: f32 },
+    Finished { count: u64, path: String },
+    Failed(String),
+}
+
+#[derive(Clone)]
+struct InsertSettings {
+    pixel_width: u32,
+    pixel_height: u32,
+    x_position: i32,
+    y_position: i32,
+    material: String,
+    x_offset: i32,
+    y_offset: i32,
+    attach_to: Option<String>,
+    draw_in_front: bool,
+    spawn_shadows: bool,
+}
+
+#[derive(Clone, Copy)]
+struct BackgroundRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    color: [u8; 3],
+}
+
+impl BackgroundRect {
+    fn to_xml(&self, settings: &InsertSettings) -> String {
+        let x = settings.x_position + (self.x * settings.pixel_width) as i32;
+        let y = settings.y_position + (self.y * settings.pixel_height) as i32;
+        let width = self.width * settings.pixel_width;
+        let height = self.height * settings.pixel_height;
+        let attach = settings
+            .attach_to
+            .as_deref()
+            .map(|value| format!(" a=\"{}\"", xml_escape(value)))
+            .unwrap_or_default();
+
+        format!(
+            "<bg x=\"{x}\" y=\"{y}\" w=\"{width}\" h=\"{height}\" m=\"{}\" c=\"#{:02X}{:02X}{:02X}\"{attach} u=\"{}\" v=\"{}\" f=\"{}\" s=\"{}\" />",
+            settings.material,
+            material_color_component(self.color[0], &settings.material),
+            material_color_component(self.color[1], &settings.material),
+            material_color_component(self.color[2], &settings.material),
+            settings.x_offset,
+            settings.y_offset,
+            u8::from(settings.draw_in_front),
+            settings.spawn_shadows,
+        )
+    }
+}
+
+fn parse_material(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.starts_with('c') && value.len() > 1 {
+        return Ok(value.to_owned());
+    }
+    let material = value.parse::<u8>().map_err(|_| {
+        "Background must be a material number or custom value starting with c.".to_owned()
+    })?;
+    if material > 16 {
+        return Err("Background material must be between 0 and 16.".into());
+    }
+    Ok(material.to_string())
+}
+
+fn material_name(value: &str) -> &'static str {
+    match value.trim() {
+        "0" => "basic",
+        "1" => "ground",
+        "2" => "usurpation",
+        "3" => "white",
+        "4" => "elevator path",
+        "5" => "impure canal",
+        "6" => "red",
+        "7" => "green",
+        "8" => "blue",
+        "9" => "damned",
+        "10" => "panel default",
+        "11" => "panel bright",
+        "12" => "panel dark",
+        "13" => "rocks",
+        "14" => "pixel wall",
+        "15" => "pixel background",
+        "16" => "pixel open door",
+        value if value.starts_with('c') => "custom background",
+        _ => "invalid material",
+    }
+}
+
+fn material_color_component(component: u8, material: &str) -> u8 {
+    if material == "3" {
+        component / 2
+    } else {
+        component
+    }
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('\"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+const MAX_VIEWER_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_IMAGE_PIXELS: u64 = 80_000_000;
+
+fn read_viewer_content(path: impl AsRef<std::path::Path>) -> Result<String, std::io::Error> {
+    let path = path.as_ref();
+    let file_size = fs::metadata(path)?.len();
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::with_capacity(file_size.min(MAX_VIEWER_BYTES) as usize);
+    file.take(MAX_VIEWER_BYTES).read_to_end(&mut bytes)?;
+
+    let preview = String::from_utf8_lossy(&bytes);
+    if file_size <= MAX_VIEWER_BYTES {
+        Ok(preview.into_owned())
+    } else {
+        Ok(format!(
+            "{preview}\n\n[Preview truncated at 2 MiB. The selected file is {file_size} bytes.]"
+        ))
+    }
+}
+
+fn convert_image_in_background(
+    image_path: String,
+    xml_path: String,
+    settings: InsertSettings,
+    option: InsertOption,
+    sender: mpsc::Sender<WorkerMessage>,
+) {
+    let image = match image::open(&image_path) {
+        Ok(image) => image.to_rgba8(),
+        Err(error) => {
+            let _ = sender.send(WorkerMessage::Failed(format!(
+                "Could not load image: {error}"
+            )));
+            return;
+        }
+    };
+    let width = image.width();
+    let height = image.height();
+    let total_pixels = width as u64 * height as u64;
+    if total_pixels > MAX_IMAGE_PIXELS {
+        let _ = sender.send(WorkerMessage::Failed(format!(
+            "Image exceeds the {}-pixel processing limit. Resize it before converting.",
+            MAX_IMAGE_PIXELS
+        )));
+        return;
+    }
+
+    let file = match fs::OpenOptions::new().append(true).open(&xml_path) {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = sender.send(WorkerMessage::Failed(format!(
+                "Could not open PB2 XML file for appending: {error}"
+            )));
+            return;
+        }
+    };
+    let mut output = BufWriter::with_capacity(1024 * 1024, file);
+    if writeln!(output).is_err() {
+        let _ = sender.send(WorkerMessage::Failed(
+            "Could not write to PB2 XML file.".into(),
+        ));
+        return;
+    }
+
+    let mut count = 0_u64;
+    let result = match option {
+        InsertOption::Basic => write_basic(&image, &settings, &mut output, &sender, &mut count),
+        InsertOption::Vertical => write_grouped(
+            &image,
+            &settings,
+            &mut output,
+            &sender,
+            &mut count,
+            InsertOption::Vertical,
+        ),
+        InsertOption::Horizontal => {
+            write_horizontal(&image, &settings, &mut output, &sender, &mut count)
+        }
+        InsertOption::TwoDimensional => write_grouped(
+            &image,
+            &settings,
+            &mut output,
+            &sender,
+            &mut count,
+            InsertOption::TwoDimensional,
+        ),
+        InsertOption::MultilayerTwoDimensional => {
+            write_multilayer_two_dimensional(&image, &settings, &mut output, &sender, &mut count)
+        }
+        InsertOption::MultilayerOneDimensional => write_grouped(
+            &image,
+            &settings,
+            &mut output,
+            &sender,
+            &mut count,
+            InsertOption::MultilayerOneDimensional,
+        ),
+    };
+
+    match result.and_then(|()| output.flush()) {
+        Ok(()) => {
+            let _ = sender.send(WorkerMessage::Progress { x: 1.0, y: 1.0 });
+            let _ = sender.send(WorkerMessage::Finished {
+                count,
+                path: xml_path,
+            });
+        }
+        Err(error) => {
+            let _ = sender.send(WorkerMessage::Failed(format!(
+                "Could not write PB2 XML: {error}"
+            )));
+        }
+    }
+}
+
+fn write_basic(
+    image: &image::RgbaImage,
+    settings: &InsertSettings,
+    output: &mut BufWriter<fs::File>,
+    sender: &mpsc::Sender<WorkerMessage>,
+    count: &mut u64,
+) -> std::io::Result<()> {
+    for y in 0..image.height() {
+        for x in 0..image.width() {
+            let color = image.get_pixel(x, y).0;
+            if color[3] != 0 {
+                write_rect(
+                    output,
+                    BackgroundRect {
+                        x,
+                        y,
+                        width: 1,
+                        height: 1,
+                        color: [color[0], color[1], color[2]],
+                    },
+                    settings,
+                )?;
+                *count += 1;
+            }
+            if x % 4_096 == 0 {
+                send_progress(sender, x, y, image.width(), image.height());
+            }
+        }
+        send_progress(sender, image.width(), y, image.width(), image.height());
+    }
+    Ok(())
+}
+
+fn write_horizontal(
+    image: &image::RgbaImage,
+    settings: &InsertSettings,
+    output: &mut BufWriter<fs::File>,
+    sender: &mpsc::Sender<WorkerMessage>,
+    count: &mut u64,
+) -> std::io::Result<()> {
+    for y in 0..image.height() {
+        let mut x = 0;
+        while x < image.width() {
+            let color = image.get_pixel(x, y).0;
+            if color[3] == 0 {
+                x += 1;
+                continue;
+            }
+            let mut run = 1;
+            while x + run < image.width() && image.get_pixel(x + run, y).0 == color {
+                run += 1;
+            }
+            write_rect(
+                output,
+                BackgroundRect {
+                    x,
+                    y,
+                    width: run,
+                    height: 1,
+                    color: [color[0], color[1], color[2]],
+                },
+                settings,
+            )?;
+            *count += 1;
+            x += run;
+            if x % 4_096 == 0 {
+                send_progress(sender, x, y, image.width(), image.height());
+            }
+        }
+        send_progress(sender, image.width(), y, image.width(), image.height());
+    }
+    Ok(())
+}
+
+fn write_grouped(
+    image: &image::RgbaImage,
+    settings: &InsertSettings,
+    output: &mut BufWriter<fs::File>,
+    sender: &mpsc::Sender<WorkerMessage>,
+    count: &mut u64,
+    option: InsertOption,
+) -> std::io::Result<()> {
+    let width = image.width();
+    let height = image.height();
+    let mut covered = vec![false; width as usize * height as usize];
+    let color_at = |x: u32, y: u32| image.get_pixel(x, y).0;
+
+    for y in 0..height {
+        for x in 0..width {
+            let index = (y as usize) * width as usize + x as usize;
+            let color = color_at(x, y);
+            if covered[index] || color[3] == 0 {
+                continue;
+            }
+            let (rect_width, rect_height) = match option {
+                InsertOption::Vertical => {
+                    vertical_run(x, y, width, height, color, &covered, &color_at)
+                }
+                InsertOption::TwoDimensional | InsertOption::MultilayerTwoDimensional => {
+                    largest_rectangle(x, y, width, height, color, &covered, &color_at)
+                }
+                InsertOption::MultilayerOneDimensional => {
+                    longest_one_dimensional_run(x, y, width, height, color, &covered, &color_at)
+                }
+                _ => (1, 1),
+            };
+            for rect_y in y..y + rect_height {
+                let row_start = rect_y as usize * width as usize;
+                for rect_x in x..x + rect_width {
+                    covered[row_start + rect_x as usize] = true;
+                }
+            }
+            write_rect(
+                output,
+                BackgroundRect {
+                    x,
+                    y,
+                    width: rect_width,
+                    height: rect_height,
+                    color: [color[0], color[1], color[2]],
+                },
+                settings,
+            )?;
+            *count += 1;
+            if x % 4_096 == 0 {
+                send_progress(sender, x, y, width, height);
+            }
+        }
+        send_progress(sender, width, y, width, height);
+    }
+    Ok(())
+}
+
+fn write_multilayer_two_dimensional(
+    image: &image::RgbaImage,
+    settings: &InsertSettings,
+    output: &mut BufWriter<fs::File>,
+    sender: &mpsc::Sender<WorkerMessage>,
+    count: &mut u64,
+) -> std::io::Result<()> {
+    let width = image.width();
+    let height = image.height();
+    let mut visited = vec![false; width as usize * height as usize];
+    let mut layers = Vec::new();
+
+    for y in 0..height {
+        for x in 0..width {
+            let start_index = y as usize * width as usize + x as usize;
+            let color = image.get_pixel(x, y).0;
+            if visited[start_index] || color[3] == 0 {
+                continue;
+            }
+
+            let mut queue = VecDeque::from([(x, y)]);
+            visited[start_index] = true;
+            let (mut min_x, mut max_x, mut min_y, mut max_y) = (x, x, y, y);
+            while let Some((current_x, current_y)) = queue.pop_front() {
+                min_x = min_x.min(current_x);
+                max_x = max_x.max(current_x);
+                min_y = min_y.min(current_y);
+                max_y = max_y.max(current_y);
+                for (next_x, next_y) in adjacent_pixels(current_x, current_y, width, height) {
+                    let next_index = next_y as usize * width as usize + next_x as usize;
+                    if !visited[next_index] && image.get_pixel(next_x, next_y).0 == color {
+                        visited[next_index] = true;
+                        queue.push_back((next_x, next_y));
+                    }
+                }
+            }
+            layers.push(BackgroundRect {
+                x: min_x,
+                y: min_y,
+                width: max_x - min_x + 1,
+                height: max_y - min_y + 1,
+                color: [color[0], color[1], color[2]],
+            });
+        }
+        send_progress(sender, width, y, width, height);
+    }
+
+    // Paint broad background regions first. Smaller regions emitted later become overlays.
+    layers
+        .sort_unstable_by_key(|layer| std::cmp::Reverse(layer.width as u64 * layer.height as u64));
+    for layer in layers {
+        write_rect(output, layer, settings)?;
+        *count += 1;
+    }
+    Ok(())
+}
+
+fn adjacent_pixels(x: u32, y: u32, width: u32, height: u32) -> impl Iterator<Item = (u32, u32)> {
+    [
+        x.checked_sub(1).map(|next_x| (next_x, y)),
+        y.checked_sub(1).map(|next_y| (x, next_y)),
+        (x + 1 < width).then_some((x + 1, y)),
+        (y + 1 < height).then_some((x, y + 1)),
+    ]
+    .into_iter()
+    .flatten()
+}
+
+fn write_rect(
+    output: &mut BufWriter<fs::File>,
+    rectangle: BackgroundRect,
+    settings: &InsertSettings,
+) -> std::io::Result<()> {
+    writeln!(output, "{}", rectangle.to_xml(settings))
+}
+
+fn send_progress(sender: &mpsc::Sender<WorkerMessage>, x: u32, y: u32, width: u32, height: u32) {
+    let _ = sender.send(WorkerMessage::Progress {
+        x: x as f32 / width as f32,
+        y: (y + 1) as f32 / height as f32,
+    });
+}
+
+fn vertical_run(
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    color: [u8; 4],
+    covered: &[bool],
+    color_at: &impl Fn(u32, u32) -> [u8; 4],
+) -> (u32, u32) {
+    let mut run_height = 1;
+    while y + run_height < height
+        && !covered[((y + run_height) * width + x) as usize]
+        && color_at(x, y + run_height) == color
+    {
+        run_height += 1;
+    }
+    (1, run_height)
+}
+
+fn horizontal_run(
+    x: u32,
+    y: u32,
+    width: u32,
+    color: [u8; 4],
+    covered: &[bool],
+    color_at: &impl Fn(u32, u32) -> [u8; 4],
+) -> (u32, u32) {
+    let mut run_width = 1;
+    while x + run_width < width
+        && !covered[(y * width + x + run_width) as usize]
+        && color_at(x + run_width, y) == color
+    {
+        run_width += 1;
+    }
+    (run_width, 1)
+}
+
+fn largest_rectangle(
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    color: [u8; 4],
+    covered: &[bool],
+    color_at: &impl Fn(u32, u32) -> [u8; 4],
+) -> (u32, u32) {
+    let mut best = (1, 1);
+    let mut max_width = 0;
+    for rect_y in y..height {
+        let mut row_width = 0;
+        while x + row_width < width
+            && !covered[(rect_y * width + x + row_width) as usize]
+            && color_at(x + row_width, rect_y) == color
+        {
+            row_width += 1;
+        }
+        max_width = if rect_y == y {
+            row_width
+        } else {
+            max_width.min(row_width)
+        };
+        if max_width == 0 {
+            break;
+        }
+        let candidate = (max_width, rect_y - y + 1);
+        if candidate.0 * candidate.1 > best.0 * best.1 {
+            best = candidate;
+        }
+    }
+    best
+}
+
+fn longest_one_dimensional_run(
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    color: [u8; 4],
+    covered: &[bool],
+    color_at: &impl Fn(u32, u32) -> [u8; 4],
+) -> (u32, u32) {
+    let horizontal = horizontal_run(x, y, width, color, covered, color_at);
+    let vertical = vertical_run(x, y, width, height, color, covered, color_at);
+    if horizontal.0 >= vertical.1 {
+        horizontal
+    } else {
+        vertical
+    }
 }
 
 fn preview_panel(ui: &mut egui::Ui, app: &Pb2ImgApp, preview_size: f32) {
