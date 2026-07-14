@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::{
     fs,
     io::{BufWriter, Read, Write},
@@ -10,10 +12,13 @@ use eframe::egui::{self, Color32, Frame, RichText, Rounding, Stroke, TextureHand
 use rfd::FileDialog;
 
 fn main() -> eframe::Result<()> {
+    let icon = load_icon_data(include_bytes!("../icon.ico"));
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1_340.0, 700.0])
-            .with_min_inner_size([1_340.0, 700.0]),
+            .with_min_inner_size([1_340.0, 700.0])
+            .with_icon(icon),
         ..Default::default()
     };
 
@@ -22,6 +27,28 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(Pb2ImgApp::new(cc)))),
     )
+}
+
+/// Decode an embedded `.ico` into the RGBA pixels eframe wants for the
+/// window title-bar icon. Falls back to a tiny transparent icon on failure
+/// so the app still launches if the file is malformed.
+fn load_icon_data(bytes: &[u8]) -> egui::IconData {
+    match image::load_from_memory_with_format(bytes, image::ImageFormat::Ico) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            egui::IconData {
+                rgba: rgba.into_raw(),
+                width: w,
+                height: h,
+            }
+        }
+        Err(_) => egui::IconData {
+            rgba: vec![0; 4],
+            width: 1,
+            height: 1,
+        },
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

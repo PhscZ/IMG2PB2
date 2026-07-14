@@ -7,3 +7,6 @@ edition = "2021"
 eframe = "0.30"
 rfd = "0.15"
 image = "0.25"
+
+[build-dependencies]
+winres = "0.1"
