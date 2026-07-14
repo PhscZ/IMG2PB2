@@ -6,8 +6,8 @@ use rfd::FileDialog;
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1_100.0, 550.0])
-            .with_min_inner_size([1_100.0, 550.0]),
+            .with_inner_size([1_200.0, 650.0])
+            .with_min_inner_size([1_200.0, 650.0]),
         ..Default::default()
     };
 
@@ -40,6 +40,7 @@ impl InsertOption {
 struct Pb2ImgApp {
     image_path: String,
     xml_path: String,
+    xml_content: String,
     pixel_x_size: String,
     pixel_y_size: String,
     x_position: String,
@@ -74,6 +75,7 @@ impl Pb2ImgApp {
         Self {
             image_path: String::new(),
             xml_path: String::new(),
+            xml_content: String::new(),
             pixel_x_size: "10".into(),
             pixel_y_size: "10".into(),
             x_position: "0".into(),
@@ -113,13 +115,38 @@ impl Pb2ImgApp {
             .pick_file()
         {
             self.xml_path = path.display().to_string();
-            self.status = "PB2 XML file selected.".into();
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    self.xml_content = content;
+                    self.status = "PB2 XML file loaded.".into();
+                }
+                Err(error) => {
+                    self.xml_content.clear();
+                    self.status = format!("Could not read PB2 XML file: {error}");
+                }
+            }
         }
     }
 
+    fn required_fields_are_defined(&self) -> bool {
+        [
+            &self.image_path,
+            &self.xml_path,
+            &self.pixel_x_size,
+            &self.pixel_y_size,
+            &self.x_position,
+            &self.y_position,
+            &self.background,
+            &self.x_offset,
+            &self.y_offset,
+        ]
+        .iter()
+        .all(|value| !value.trim().is_empty())
+    }
+
     fn insert_image(&mut self) {
-        if self.image_path.is_empty() || self.xml_path.is_empty() {
-            self.status = "Choose both an image and a PB2 XML file first.".into();
+        if !self.required_fields_are_defined() {
+            self.status = "Complete all required image and placement fields first.".into();
             return;
         }
         self.status = format!("Ready to insert using {}.", self.option.label());
@@ -163,15 +190,19 @@ impl eframe::App for Pb2ImgApp {
                             option_controls(ui, self, controls_width);
                             ui.add_space(16.0);
                             ui.horizontal(|ui| {
+                                let can_insert = self.required_fields_are_defined();
                                 if ui
-                                    .add_sized(
-                                        [150.0, 38.0],
-                                        dark_button(
-                                            RichText::new("INSERT IMAGE")
-                                                .strong()
-                                                .color(label_color()),
-                                        ),
-                                    )
+                                    .add_enabled_ui(can_insert, |ui| {
+                                        ui.add_sized(
+                                            [150.0, 38.0],
+                                            dark_button(
+                                                RichText::new("INSERT IMAGE")
+                                                    .strong()
+                                                    .color(label_color()),
+                                            ),
+                                        )
+                                    })
+                                    .inner
                                     .clicked()
                                 {
                                     self.insert_image();
@@ -181,6 +212,8 @@ impl eframe::App for Pb2ImgApp {
                                         .color(Color32::from_rgb(161, 188, 222)),
                                 );
                             });
+                            ui.add_space(10.0);
+                            xml_content_viewer(ui, &mut self.xml_content, controls_width);
                         },
                     );
                     ui.add_space(COLUMN_GAP);
@@ -274,6 +307,37 @@ fn dark_text_edit(value: &mut String) -> egui::TextEdit<'_> {
         .vertical_align(egui::Align::Center)
 }
 
+fn xml_content_viewer(ui: &mut egui::Ui, content: &mut String, controls_width: f32) {
+    let viewer_height = ui.available_height().max(80.0);
+    ui.allocate_ui(Vec2::new(controls_width, viewer_height), |ui| {
+        Frame::none()
+            .fill(Color32::from_rgb(22, 28, 42))
+            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(78, 94, 124)))
+            .show(ui, |ui| {
+                ui.set_min_size(Vec2::new(controls_width - 2.0, viewer_height - 2.0));
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if content.is_empty() {
+                            ui.label(
+                                RichText::new(
+                                    "Selected PB2 XML or text file contents will appear here.",
+                                )
+                                .monospace()
+                                .color(Color32::GRAY),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new(content.as_str())
+                                    .monospace()
+                                    .color(Color32::from_rgb(214, 223, 238)),
+                            );
+                        }
+                    });
+            });
+    });
+}
+
 fn option_controls(ui: &mut egui::Ui, app: &mut Pb2ImgApp, controls_width: f32) {
     section_title(ui, "INSERT MODE");
     ui.horizontal(|ui| {
@@ -323,7 +387,7 @@ fn preview_panel(ui: &mut egui::Ui, app: &Pb2ImgApp, preview_size: f32) {
         ui.add_space(4.0);
         ui.allocate_ui(Vec2::splat(preview_size), |ui| {
             Frame::none()
-                .fill(Color32::BLACK)
+                .fill(Color32::from_rgb(22, 28, 42))
                 .stroke(Stroke::new(FRAME_STROKE, Color32::from_rgb(61, 73, 101)))
                 .rounding(Rounding::same(10.0))
                 .inner_margin(FRAME_MARGIN)
