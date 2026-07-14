@@ -1,5 +1,4 @@
 use std::{
-    collections::VecDeque,
     fs,
     io::{BufWriter, Read, Write},
     path::PathBuf,
@@ -726,9 +725,14 @@ fn convert_image_in_background(
             &mut count,
             InsertOption::TwoDimensional,
         ),
-        InsertOption::MultilayerTwoDimensional => {
-            write_multilayer_two_dimensional(&image, &settings, &mut output, &sender, &mut count)
-        }
+        InsertOption::MultilayerTwoDimensional => write_grouped(
+            &image,
+            &settings,
+            &mut output,
+            &sender,
+            &mut count,
+            InsertOption::MultilayerTwoDimensional,
+        ),
         InsertOption::MultilayerOneDimensional => write_grouped(
             &image,
             &settings,
@@ -886,74 +890,6 @@ fn write_grouped(
         send_progress(sender, width, y, width, height);
     }
     Ok(())
-}
-
-fn write_multilayer_two_dimensional(
-    image: &image::RgbaImage,
-    settings: &InsertSettings,
-    output: &mut BufWriter<fs::File>,
-    sender: &mpsc::Sender<WorkerMessage>,
-    count: &mut u64,
-) -> std::io::Result<()> {
-    let width = image.width();
-    let height = image.height();
-    let mut visited = vec![false; width as usize * height as usize];
-    let mut layers = Vec::new();
-
-    for y in 0..height {
-        for x in 0..width {
-            let start_index = y as usize * width as usize + x as usize;
-            let color = image.get_pixel(x, y).0;
-            if visited[start_index] || color[3] == 0 {
-                continue;
-            }
-
-            let mut queue = VecDeque::from([(x, y)]);
-            visited[start_index] = true;
-            let (mut min_x, mut max_x, mut min_y, mut max_y) = (x, x, y, y);
-            while let Some((current_x, current_y)) = queue.pop_front() {
-                min_x = min_x.min(current_x);
-                max_x = max_x.max(current_x);
-                min_y = min_y.min(current_y);
-                max_y = max_y.max(current_y);
-                for (next_x, next_y) in adjacent_pixels(current_x, current_y, width, height) {
-                    let next_index = next_y as usize * width as usize + next_x as usize;
-                    if !visited[next_index] && image.get_pixel(next_x, next_y).0 == color {
-                        visited[next_index] = true;
-                        queue.push_back((next_x, next_y));
-                    }
-                }
-            }
-            layers.push(BackgroundRect {
-                x: min_x,
-                y: min_y,
-                width: max_x - min_x + 1,
-                height: max_y - min_y + 1,
-                color: [color[0], color[1], color[2]],
-            });
-        }
-        send_progress(sender, width, y, width, height);
-    }
-
-    // Paint broad background regions first. Smaller regions emitted later become overlays.
-    layers
-        .sort_unstable_by_key(|layer| std::cmp::Reverse(layer.width as u64 * layer.height as u64));
-    for layer in layers {
-        write_rect(output, layer, settings)?;
-        *count += 1;
-    }
-    Ok(())
-}
-
-fn adjacent_pixels(x: u32, y: u32, width: u32, height: u32) -> impl Iterator<Item = (u32, u32)> {
-    [
-        x.checked_sub(1).map(|next_x| (next_x, y)),
-        y.checked_sub(1).map(|next_y| (x, next_y)),
-        (x + 1 < width).then_some((x + 1, y)),
-        (y + 1 < height).then_some((x, y + 1)),
-    ]
-    .into_iter()
-    .flatten()
 }
 
 fn write_rect(
