@@ -207,16 +207,25 @@ impl Pb2ImgApp {
             return Err("Pixel X size and Pixel Y size must be greater than zero.".into());
         }
 
+        let material = parse_material(&self.background)?;
+        let is_material_3 = material == "3";
+        let material_xml = xml_escape(&material);
+        let attach_xml = if self.attach_to.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" a=\"{}\"", xml_escape(self.attach_to.trim()))
+        };
+
         Ok(InsertSettings {
             pixel_width,
             pixel_height,
             x_position: parse_i32("X position", &self.x_position)?,
             y_position: parse_i32("Y position", &self.y_position)?,
-            material: parse_material(&self.background)?,
+            material_xml,
+            is_material_3,
             x_offset: parse_i32("X offset", &self.x_offset)?,
             y_offset: parse_i32("Y offset", &self.y_offset)?,
-            attach_to: (!self.attach_to.trim().is_empty())
-                .then(|| self.attach_to.trim().to_owned()),
+            attach_xml,
             draw_in_front: self.draw_in_front,
             spawn_shadows: self.spawn_shadows,
         })
@@ -569,10 +578,11 @@ struct InsertSettings {
     pixel_height: u32,
     x_position: i32,
     y_position: i32,
-    material: String,
+    material_xml: String,
+    is_material_3: bool,
     x_offset: i32,
     y_offset: i32,
-    attach_to: Option<String>,
+    attach_xml: String,
     draw_in_front: bool,
     spawn_shadows: bool,
 }
@@ -584,32 +594,6 @@ struct BackgroundRect {
     width: u32,
     height: u32,
     color: [u8; 3],
-}
-
-impl BackgroundRect {
-    fn to_xml(&self, settings: &InsertSettings) -> String {
-        let x = settings.x_position + (self.x * settings.pixel_width) as i32;
-        let y = settings.y_position + (self.y * settings.pixel_height) as i32;
-        let width = self.width * settings.pixel_width;
-        let height = self.height * settings.pixel_height;
-        let attach = settings
-            .attach_to
-            .as_deref()
-            .map(|value| format!(" a=\"{}\"", xml_escape(value)))
-            .unwrap_or_default();
-
-        format!(
-            "<bg x=\"{x}\" y=\"{y}\" w=\"{width}\" h=\"{height}\" m=\"{}\" c=\"#{:02X}{:02X}{:02X}\"{attach} u=\"{}\" v=\"{}\" f=\"{}\" s=\"{}\" />",
-            settings.material,
-            material_color_component(self.color[0], &settings.material),
-            material_color_component(self.color[1], &settings.material),
-            material_color_component(self.color[2], &settings.material),
-            settings.x_offset,
-            settings.y_offset,
-            u8::from(settings.draw_in_front),
-            settings.spawn_shadows,
-        )
-    }
 }
 
 fn parse_material(value: &str) -> Result<String, String> {
@@ -647,14 +631,6 @@ fn material_name(value: &str) -> &'static str {
         "16" => "pixel open door",
         value if value.starts_with('c') => "custom background",
         _ => "invalid material",
-    }
-}
-
-fn material_color_component(component: u8, material: &str) -> u8 {
-    if material == "3" {
-        component / 2
-    } else {
-        component
     }
 }
 
@@ -920,11 +896,32 @@ fn write_grouped(
 }
 
 fn write_rect(
-    output: &mut BufWriter<fs::File>,
-    rectangle: BackgroundRect,
+    output: &mut impl std::io::Write,
+    rect: BackgroundRect,
     settings: &InsertSettings,
 ) -> std::io::Result<()> {
-    writeln!(output, "{}", rectangle.to_xml(settings))
+    let x = settings.x_position + (rect.x * settings.pixel_width) as i32;
+    let y = settings.y_position + (rect.y * settings.pixel_height) as i32;
+    let w = rect.width * settings.pixel_width;
+    let h = rect.height * settings.pixel_height;
+
+    let (c0, c1, c2) = if settings.is_material_3 {
+        (rect.color[0] / 2, rect.color[1] / 2, rect.color[2] / 2)
+    } else {
+        (rect.color[0], rect.color[1], rect.color[2])
+    };
+
+    writeln!(
+        output,
+        "<bg x=\"{x}\" y=\"{y}\" w=\"{w}\" h=\"{h}\" m=\"{}\" c=\"#{:02X}{:02X}{:02X}\"{} u=\"{}\" v=\"{}\" f=\"{}\" s=\"{}\" />",
+        settings.material_xml,
+        c0, c1, c2,
+        settings.attach_xml,
+        settings.x_offset,
+        settings.y_offset,
+        u8::from(settings.draw_in_front),
+        settings.spawn_shadows,
+    )
 }
 
 fn send_progress(sender: &mpsc::Sender<WorkerMessage>, x: u32, y: u32, width: u32, height: u32) {
@@ -981,20 +978,19 @@ fn largest_rectangle(
     color_at: &impl Fn(u32, u32) -> [u8; 4],
 ) -> (u32, u32) {
     let mut best = (1, 1);
-    let mut max_width = 0;
+    let mut max_width = u32::MAX;
     for rect_y in y..height {
         let mut row_width = 0;
-        while x + row_width < width
+        while row_width < max_width
+            && x + row_width < width
             && !covered[(rect_y * width + x + row_width) as usize]
             && color_at(x + row_width, rect_y) == color
         {
             row_width += 1;
         }
-        max_width = if rect_y == y {
-            row_width
-        } else {
-            max_width.min(row_width)
-        };
+        if row_width < max_width {
+            max_width = row_width;
+        }
         if max_width == 0 {
             break;
         }
