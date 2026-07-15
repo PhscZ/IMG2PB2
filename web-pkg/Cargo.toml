@@ -1,0 +1,18 @@
+[package]
+name = "img2pb2-web"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "img2pb2_web"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+img2pb2 = { path = ".." }
+eframe = "0.30"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+log = "0.4"
+console_error_panic_hook = "0.1"

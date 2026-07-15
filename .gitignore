@@ -11,3 +11,7 @@
 # OS files
 .DS_Store
 Thumbs.db
+
+# Web build output
+/web/pkg
+/web/dist
