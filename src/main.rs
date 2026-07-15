@@ -188,22 +188,16 @@ impl Pb2ImgApp {
     }
 
     fn settings(&self) -> Result<InsertSettings, String> {
-        let parse_i32 = |label: &str, value: &str| {
+        let parse_f64 = |label: &str, value: &str| {
             value
                 .trim()
-                .parse::<i32>()
-                .map_err(|_| format!("{label} must be a whole number."))
-        };
-        let parse_u32 = |label: &str, value: &str| {
-            value
-                .trim()
-                .parse::<u32>()
-                .map_err(|_| format!("{label} must be a positive whole number."))
+                .parse::<f64>()
+                .map_err(|_| format!("{label} must be a number."))
         };
 
-        let pixel_width = parse_u32("Pixel X size", &self.pixel_x_size)?;
-        let pixel_height = parse_u32("Pixel Y size", &self.pixel_y_size)?;
-        if pixel_width == 0 || pixel_height == 0 {
+        let pixel_width = parse_f64("Pixel X size", &self.pixel_x_size)?;
+        let pixel_height = parse_f64("Pixel Y size", &self.pixel_y_size)?;
+        if pixel_width <= 0.0 || pixel_height <= 0.0 {
             return Err("Pixel X size and Pixel Y size must be greater than zero.".into());
         }
 
@@ -219,12 +213,12 @@ impl Pb2ImgApp {
         Ok(InsertSettings {
             pixel_width,
             pixel_height,
-            x_position: parse_i32("X position", &self.x_position)?,
-            y_position: parse_i32("Y position", &self.y_position)?,
+            x_position: parse_f64("X position", &self.x_position)?,
+            y_position: parse_f64("Y position", &self.y_position)?,
             material_xml,
             is_material_3,
-            x_offset: parse_i32("X offset", &self.x_offset)?,
-            y_offset: parse_i32("Y offset", &self.y_offset)?,
+            x_offset: parse_f64("X offset", &self.x_offset)?,
+            y_offset: parse_f64("Y offset", &self.y_offset)?,
             attach_xml,
             draw_in_front: self.draw_in_front,
             spawn_shadows: self.spawn_shadows,
@@ -574,14 +568,14 @@ enum WorkerMessage {
 
 #[derive(Clone)]
 struct InsertSettings {
-    pixel_width: u32,
-    pixel_height: u32,
-    x_position: i32,
-    y_position: i32,
+    pixel_width: f64,
+    pixel_height: f64,
+    x_position: f64,
+    y_position: f64,
     material_xml: String,
     is_material_3: bool,
-    x_offset: i32,
-    y_offset: i32,
+    x_offset: f64,
+    y_offset: f64,
     attach_xml: String,
     draw_in_front: bool,
     spawn_shadows: bool,
@@ -900,10 +894,10 @@ fn write_rect(
     rect: BackgroundRect,
     settings: &InsertSettings,
 ) -> std::io::Result<()> {
-    let x = settings.x_position + (rect.x * settings.pixel_width) as i32;
-    let y = settings.y_position + (rect.y * settings.pixel_height) as i32;
-    let w = rect.width * settings.pixel_width;
-    let h = rect.height * settings.pixel_height;
+    let x = settings.x_position + rect.x as f64 * settings.pixel_width;
+    let y = settings.y_position + rect.y as f64 * settings.pixel_height;
+    let w = rect.width as f64 * settings.pixel_width;
+    let h = rect.height as f64 * settings.pixel_height;
 
     let (c0, c1, c2) = if settings.is_material_3 {
         (rect.color[0] / 2, rect.color[1] / 2, rect.color[2] / 2)
