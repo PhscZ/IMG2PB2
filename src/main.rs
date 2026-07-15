@@ -889,6 +889,10 @@ fn write_grouped(
     Ok(())
 }
 
+fn same_visible_color(a: [u8; 4], b: [u8; 4]) -> bool {
+    a[3] != 0 && b[3] != 0 && a[..3] == b[..3]
+}
+
 fn write_rect(
     output: &mut impl std::io::Write,
     rect: BackgroundRect,
@@ -899,6 +903,7 @@ fn write_rect(
     let w = rect.width as f64 * settings.pixel_width;
     let h = rect.height as f64 * settings.pixel_height;
 
+    // Material 3 doubles the rendered brightness, so encode half the source RGB.
     let (c0, c1, c2) = if settings.is_material_3 {
         (rect.color[0] / 2, rect.color[1] / 2, rect.color[2] / 2)
     } else {
@@ -937,7 +942,7 @@ fn vertical_run(
     let mut run_height = 1;
     while y + run_height < height
         && !covered[((y + run_height) * width + x) as usize]
-        && color_at(x, y + run_height) == color
+        && same_visible_color(color_at(x, y + run_height), color)
     {
         run_height += 1;
     }
@@ -955,7 +960,7 @@ fn horizontal_run(
     let mut run_width = 1;
     while x + run_width < width
         && !covered[(y * width + x + run_width) as usize]
-        && color_at(x + run_width, y) == color
+        && same_visible_color(color_at(x + run_width, y), color)
     {
         run_width += 1;
     }
@@ -978,7 +983,7 @@ fn largest_rectangle(
         while row_width < max_width
             && x + row_width < width
             && !covered[(rect_y * width + x + row_width) as usize]
-            && color_at(x + row_width, rect_y) == color
+            && same_visible_color(color_at(x + row_width, rect_y), color)
         {
             row_width += 1;
         }
