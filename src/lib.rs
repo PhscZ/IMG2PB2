@@ -1074,11 +1074,12 @@ fn write_rect<W: Write>(
     let w = rect.width as f64 * settings.pixel_width;
     let h = rect.height as f64 * settings.pixel_height;
 
-    // Material 3 doubles the rendered brightness, so encode half the source RGB.
+    // Material 3 uses raw RGB; all other materials encode half the source RGB
+    // (the PB2 renderer applies a 2x brightness multiplier).
     let (c0, c1, c2) = if settings.is_material_3 {
-        (rect.color[0] / 2, rect.color[1] / 2, rect.color[2] / 2)
-    } else {
         (rect.color[0], rect.color[1], rect.color[2])
+    } else {
+        (rect.color[0] / 2, rect.color[1] / 2, rect.color[2] / 2)
     };
 
     writeln!(
