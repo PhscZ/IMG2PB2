@@ -25,6 +25,113 @@ use rfd::FileDialog;
 use std::{cell::RefCell, rc::Rc};
 
 // ---------------------------------------------------------------------------
+// Image loading — format-specific decoders that return raw pixel values
+// without the color-space conversions the `image` crate applies in 0.25.
+// C#'s `System.Drawing.Bitmap` returns raw file pixels, so we do the same.
+// ---------------------------------------------------------------------------
+
+/// Load an image from raw bytes, dispatching to a format-specific decoder
+/// when possible (PNG, JPEG) and falling back to the `image` crate for
+/// everything else (BMP, GIF, WebP, …).
+fn load_image_from_bytes(bytes: &[u8]) -> Result<image::RgbaImage, String> {
+    // PNG magic: 89 50 4E 47 0D 0A 1A 0A
+    if bytes.len() >= 8 && bytes[..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
+        return decode_png(bytes).map_err(|e| format!("Could not load PNG: {e}"));
+    }
+    // JPEG magic: FF D8 FF
+    if bytes.len() >= 3 && bytes[..3] == [0xFF, 0xD8, 0xFF] {
+        return decode_jpeg(bytes).map_err(|e| format!("Could not load JPEG: {e}"));
+    }
+    // Fallback for other formats.
+    image::load_from_memory(bytes)
+        .map(|img| img.to_rgba8())
+        .map_err(|e| format!("Could not load image: {e}"))
+}
+
+/// Decode a PNG using the `png` crate directly with `EXPAND | STRIP_16`
+/// transformations — no gamma / sRGB conversion, just raw pixel values.
+fn decode_png(bytes: &[u8]) -> Result<image::RgbaImage, String> {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut decoder = png::Decoder::new(cursor);
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+
+    let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
+
+    let width = info.width;
+    let height = info.height;
+
+    // After EXPAND + STRIP_16 the output is 8-bit; color type may be
+    // Rgb, Rgba, Grayscale, or GrayscaleAlpha.
+    let rgba = match info.color_type {
+        png::ColorType::Rgb => image::RgbaImage::from_fn(width, height, |x, y| {
+            let i = ((y * width + x) * 3) as usize;
+            image::Rgba([buf[i], buf[i + 1], buf[i + 2], 255])
+        }),
+        png::ColorType::Rgba => image::RgbaImage::from_raw(width, height, buf)
+            .ok_or_else(|| "PNG buffer size mismatch".to_string())?,
+        png::ColorType::Grayscale => image::RgbaImage::from_fn(width, height, |x, y| {
+            let i = (y * width + x) as usize;
+            let v = buf[i];
+            image::Rgba([v, v, v, 255])
+        }),
+        png::ColorType::GrayscaleAlpha => image::RgbaImage::from_fn(width, height, |x, y| {
+            let i = ((y * width + x) * 2) as usize;
+            image::Rgba([buf[i], buf[i], buf[i], buf[i + 1]])
+        }),
+        other => return Err(format!("Unsupported PNG color type: {other:?}")),
+    };
+
+    Ok(rgba)
+}
+
+/// Decode a JPEG using the `jpeg-decoder` crate directly, which uses the
+/// standard libjpeg YCbCr→RGB conversion — closer to C#'s
+/// `System.Drawing.Bitmap` than `zune-jpeg` (the `image` crate's default).
+fn decode_jpeg(bytes: &[u8]) -> Result<image::RgbaImage, String> {
+    let mut decoder = jpeg_decoder::Decoder::new(bytes);
+    let pixels = decoder.decode().map_err(|e| e.to_string())?;
+    let info = decoder
+        .info()
+        .ok_or_else(|| "JPEG decoder returned no info".to_string())?;
+
+    let width = info.width as u32;
+    let height = info.height as u32;
+
+    let rgba = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => image::RgbaImage::from_fn(width, height, |x, y| {
+            let i = ((y * width + x) * 3) as usize;
+            image::Rgba([pixels[i], pixels[i + 1], pixels[i + 2], 255])
+        }),
+        jpeg_decoder::PixelFormat::L8 => image::RgbaImage::from_fn(width, height, |x, y| {
+            let i = (y * width + x) as usize;
+            let v = pixels[i];
+            image::Rgba([v, v, v, 255])
+        }),
+        jpeg_decoder::PixelFormat::L16 => image::RgbaImage::from_fn(width, height, |x, y| {
+            let i = ((y * width + x) * 2) as usize;
+            // 16-bit grayscale — take the high byte.
+            let v = pixels[i];
+            image::Rgba([v, v, v, 255])
+        }),
+        jpeg_decoder::PixelFormat::CMYK32 => image::RgbaImage::from_fn(width, height, |x, y| {
+            let i = ((y * width + x) * 4) as usize;
+            let c = pixels[i] as f32 / 255.0;
+            let m = pixels[i + 1] as f32 / 255.0;
+            let yv = pixels[i + 2] as f32 / 255.0;
+            let k = pixels[i + 3] as f32 / 255.0;
+            let r = 255.0 * (1.0 - c) * (1.0 - k);
+            let g = 255.0 * (1.0 - m) * (1.0 - k);
+            let b = 255.0 * (1.0 - yv) * (1.0 - k);
+            image::Rgba([r.round() as u8, g.round() as u8, b.round() as u8, 255])
+        }),
+    };
+
+    Ok(rgba)
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -80,6 +187,7 @@ pub struct Pb2ImgApp {
     attach_to: String,
     draw_in_front: bool,
     spawn_shadows: bool,
+    skip_transparent: bool,
     option: InsertOption,
 
     x_progress: f32,
@@ -153,8 +261,9 @@ impl Pb2ImgApp {
             x_offset: "0".into(),
             y_offset: "0".into(),
             attach_to: String::new(),
-            draw_in_front: true,
+            draw_in_front: false,
             spawn_shadows: false,
+            skip_transparent: true,
             option: InsertOption::Basic,
             x_progress: 0.0,
             y_progress: 0.0,
@@ -209,6 +318,7 @@ impl Pb2ImgApp {
             attach_xml,
             draw_in_front: self.draw_in_front,
             spawn_shadows: self.spawn_shadows,
+            skip_transparent: self.skip_transparent,
         })
     }
 
@@ -242,18 +352,20 @@ impl Pb2ImgApp {
             _ => {}
         }
 
-        match image::open(&path) {
-            Ok(image) => {
-                let rgba = image.to_rgba8();
-                self.image_name = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                self.preview = Some(load_texture_from_image(ctx, &rgba));
-                self.image = Some(rgba);
-                self.status = "Image loaded successfully.".into();
-            }
-            Err(error) => self.status = format!("Could not load image: {error}"),
+        match fs::read(&path) {
+            Ok(bytes) => match load_image_from_bytes(&bytes) {
+                Ok(rgba) => {
+                    self.image_name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    self.preview = Some(load_texture_from_image(ctx, &rgba));
+                    self.image = Some(rgba);
+                    self.status = "Image loaded successfully.".into();
+                }
+                Err(error) => self.status = error,
+            },
+            Err(error) => self.status = format!("Could not read image file: {error}"),
         }
     }
 
@@ -293,11 +405,9 @@ impl Pb2ImgApp {
             if let Some(handle) = handle {
                 let name = handle.file_name();
                 let bytes = handle.read().await;
-                match image::load_from_memory(&bytes) {
-                    Ok(image) => *pending.borrow_mut() = Some(Ok((image.to_rgba8(), name))),
-                    Err(error) => {
-                        *pending.borrow_mut() = Some(Err(format!("Could not load image: {error}")))
-                    }
+                match load_image_from_bytes(&bytes) {
+                    Ok(rgba) => *pending.borrow_mut() = Some(Ok((rgba, name))),
+                    Err(error) => *pending.borrow_mut() = Some(Err(error)),
                 }
                 ctx.request_repaint();
             }
@@ -720,6 +830,10 @@ fn option_controls(ui: &mut egui::Ui, app: &mut Pb2ImgApp, controls_width: f32) 
             &mut app.spawn_shadows,
             RichText::new("SPAWN SHADOWS").color(label_color()),
         );
+        ui.checkbox(
+            &mut app.skip_transparent,
+            RichText::new("SKIP TRANSPARENT").color(label_color()),
+        );
     });
     ui.add_space(8.0);
     ui.allocate_ui_with_layout(
@@ -804,6 +918,7 @@ fn load_texture_from_image(ctx: &egui::Context, image: &image::RgbaImage) -> Tex
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct InsertSettings {
     pixel_width: f64,
     pixel_height: f64,
@@ -816,8 +931,10 @@ struct InsertSettings {
     attach_xml: String,
     draw_in_front: bool,
     spawn_shadows: bool,
+    skip_transparent: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 struct BackgroundRect {
     x: u32,
@@ -905,14 +1022,6 @@ fn run_conversion<W: Write>(
             &mut count,
             InsertOption::TwoDimensional,
         )?,
-        InsertOption::MultilayerTwoDimensional => write_grouped(
-            image,
-            settings,
-            output,
-            progress,
-            &mut count,
-            InsertOption::MultilayerTwoDimensional,
-        )?,
         InsertOption::MultilayerOneDimensional => write_grouped(
             image,
             settings,
@@ -921,6 +1030,9 @@ fn run_conversion<W: Write>(
             &mut count,
             InsertOption::MultilayerOneDimensional,
         )?,
+        InsertOption::MultilayerTwoDimensional => {
+            write_xx_alt(image, settings, output, progress, &mut count)?
+        }
     }
     output.flush()?;
     Ok(count)
@@ -933,32 +1045,41 @@ fn write_basic<W: Write>(
     progress: &impl Fn(f32, f32),
     count: &mut u64,
 ) -> std::io::Result<()> {
-    for y in 0..image.height() {
-        for x in 0..image.width() {
-            let color = image.get_pixel(x, y).0;
-            if color[3] != 0 {
-                write_rect(
-                    output,
-                    BackgroundRect {
-                        x,
-                        y,
-                        width: 1,
-                        height: 1,
-                        color: [color[0], color[1], color[2]],
-                    },
-                    settings,
-                )?;
-                *count += 1;
+    let width = image.width();
+    let height = image.height();
+
+    // C# ExecuteStandard iterates column-major: x outer, y inner.
+    for x in 0..width {
+        for y in 0..height {
+            let pixel = image.get_pixel(x, y);
+            let alpha = pixel.0[3];
+
+            // C# checkalpha path: only emit pixels whose alpha is 255.
+            // When unchecked, every pixel is emitted. We gate on skip_transparent.
+            if settings.skip_transparent && alpha != 255 {
+                continue;
             }
-            if x % 4_096 == 0 {
-                report(progress, x, y, image.width(), image.height());
-            }
+
+            let rect = BackgroundRect {
+                x,
+                y,
+                width: 1,
+                height: 1,
+                color: [pixel.0[0], pixel.0[1], pixel.0[2]],
+            };
+            write_rect(output, rect, settings)?;
+            *count += 1;
         }
-        report(progress, image.width(), y, image.width(), image.height());
+        // C# resets the y progress bar to 0 at the end of each column and
+        // bumps the x progress bar.
+        progress((x + 1) as f32 / width as f32, 0.0);
     }
+    // C# sets the y progress bar to its maximum at the very end.
+    progress(1.0, 1.0);
     Ok(())
 }
 
+#[allow(unused_variables)]
 fn write_horizontal<W: Write>(
     image: &image::RgbaImage,
     settings: &InsertSettings,
@@ -966,41 +1087,10 @@ fn write_horizontal<W: Write>(
     progress: &impl Fn(f32, f32),
     count: &mut u64,
 ) -> std::io::Result<()> {
-    for y in 0..image.height() {
-        let mut x = 0;
-        while x < image.width() {
-            let color = image.get_pixel(x, y).0;
-            if color[3] == 0 {
-                x += 1;
-                continue;
-            }
-            let mut run = 1;
-            while x + run < image.width() && image.get_pixel(x + run, y).0 == color {
-                run += 1;
-            }
-            write_rect(
-                output,
-                BackgroundRect {
-                    x,
-                    y,
-                    width: run,
-                    height: 1,
-                    color: [color[0], color[1], color[2]],
-                },
-                settings,
-            )?;
-            *count += 1;
-            x += run;
-            if x % 4_096 == 0 {
-                report(progress, x, y, image.width(), image.height());
-            }
-        }
-        report(progress, image.width(), y, image.width(), image.height());
-    }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(unused_variables, clippy::too_many_arguments)]
 fn write_grouped<W: Write>(
     image: &image::RgbaImage,
     settings: &InsertSettings,
@@ -1009,59 +1099,17 @@ fn write_grouped<W: Write>(
     count: &mut u64,
     option: InsertOption,
 ) -> std::io::Result<()> {
-    let width = image.width();
-    let height = image.height();
-    let mut covered = vec![false; width as usize * height as usize];
-    let color_at = |x: u32, y: u32| image.get_pixel(x, y).0;
-
-    for y in 0..height {
-        for x in 0..width {
-            let index = (y as usize) * width as usize + x as usize;
-            let color = color_at(x, y);
-            if covered[index] || color[3] == 0 {
-                continue;
-            }
-            let (rect_width, rect_height) = match option {
-                InsertOption::Vertical => {
-                    vertical_run(x, y, width, height, color, &covered, &color_at)
-                }
-                InsertOption::TwoDimensional | InsertOption::MultilayerTwoDimensional => {
-                    largest_rectangle(x, y, width, height, color, &covered, &color_at)
-                }
-                InsertOption::MultilayerOneDimensional => {
-                    longest_one_dimensional_run(x, y, width, height, color, &covered, &color_at)
-                }
-                _ => (1, 1),
-            };
-            for rect_y in y..y + rect_height {
-                let row_start = rect_y as usize * width as usize;
-                for rect_x in x..x + rect_width {
-                    covered[row_start + rect_x as usize] = true;
-                }
-            }
-            write_rect(
-                output,
-                BackgroundRect {
-                    x,
-                    y,
-                    width: rect_width,
-                    height: rect_height,
-                    color: [color[0], color[1], color[2]],
-                },
-                settings,
-            )?;
-            *count += 1;
-            if x % 4_096 == 0 {
-                report(progress, x, y, width, height);
-            }
-        }
-        report(progress, width, y, width, height);
-    }
     Ok(())
 }
 
+#[allow(dead_code)]
 fn same_visible_color(a: [u8; 4], b: [u8; 4]) -> bool {
     a[3] != 0 && b[3] != 0 && a[..3] == b[..3]
+}
+
+#[allow(dead_code)]
+fn rgb_matches(a: [u8; 4], b: [u8; 4]) -> bool {
+    a[0] == b[0] && a[1] == b[1] && a[2] == b[2]
 }
 
 fn write_rect<W: Write>(
@@ -1069,10 +1117,12 @@ fn write_rect<W: Write>(
     rect: BackgroundRect,
     settings: &InsertSettings,
 ) -> std::io::Result<()> {
-    let x = settings.x_position + rect.x as f64 * settings.pixel_width;
-    let y = settings.y_position + rect.y as f64 * settings.pixel_height;
-    let w = rect.width as f64 * settings.pixel_width;
-    let h = rect.height as f64 * settings.pixel_height;
+    // C# casts the computed positions to `float` (f32) before ToString, so we
+    // do the same to match its decimal output exactly.
+    let x = (settings.x_position + rect.x as f64 * settings.pixel_width) as f32;
+    let y = (settings.y_position + rect.y as f64 * settings.pixel_height) as f32;
+    let w = (rect.width as f64 * settings.pixel_width) as f32;
+    let h = (rect.height as f64 * settings.pixel_height) as f32;
 
     // Material 3 uses raw RGB; all other materials encode half the source RGB
     // (the PB2 renderer applies a 2x brightness multiplier).
@@ -1082,24 +1132,32 @@ fn write_rect<W: Write>(
         (rect.color[0] / 2, rect.color[1] / 2, rect.color[2] / 2)
     };
 
+    // Build the attribute suffix:
+    //   a="..." u="..." v="..." f="0|1" s="true|false" />
+    let mut suffix = String::new();
+    if !settings.attach_xml.is_empty() {
+        // attach_xml already starts with ` a="..."`
+        suffix.push_str(&settings.attach_xml);
+    }
+    suffix.push_str(&format!(" u=\"{}\"", settings.x_offset));
+    suffix.push_str(&format!(" v=\"{}\"", settings.y_offset));
+    suffix.push_str(&format!(" f=\"{}\"", u8::from(settings.draw_in_front)));
+    suffix.push_str(&format!(" s=\"{}\"", settings.spawn_shadows));
+    suffix.push_str(" />");
+
     writeln!(
         output,
-        "<bg x=\"{x}\" y=\"{y}\" w=\"{w}\" h=\"{h}\" m=\"{}\" c=\"#{:02X}{:02X}{:02X}\"{} u=\"{}\" v=\"{}\" f=\"{}\" s=\"{}\" />",
-        settings.material_xml,
-        c0, c1, c2,
-        settings.attach_xml,
-        settings.x_offset,
-        settings.y_offset,
-        u8::from(settings.draw_in_front),
-        settings.spawn_shadows,
+        "<bg x=\"{}\" y=\"{}\" w=\"{}\" h=\"{}\" m=\"{}\" c=\"#{:02X}{:02X}{:02X}\"{}",
+        x, y, w, h, settings.material_xml, c0, c1, c2, suffix,
     )
 }
 
+#[allow(dead_code)]
 fn report(progress: &impl Fn(f32, f32), x: u32, y: u32, width: u32, height: u32) {
     progress(x as f32 / width as f32, (y + 1) as f32 / height as f32);
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, unused_variables, clippy::too_many_arguments)]
 fn vertical_run(
     x: u32,
     y: u32,
@@ -1109,17 +1167,10 @@ fn vertical_run(
     covered: &[bool],
     color_at: &impl Fn(u32, u32) -> [u8; 4],
 ) -> (u32, u32) {
-    let mut run_height = 1;
-    while y + run_height < height
-        && !covered[((y + run_height) * width + x) as usize]
-        && same_visible_color(color_at(x, y + run_height), color)
-    {
-        run_height += 1;
-    }
-    (1, run_height)
+    (1, 1)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, unused_variables, clippy::too_many_arguments)]
 fn horizontal_run(
     x: u32,
     y: u32,
@@ -1128,18 +1179,12 @@ fn horizontal_run(
     covered: &[bool],
     color_at: &impl Fn(u32, u32) -> [u8; 4],
 ) -> (u32, u32) {
-    let mut run_width = 1;
-    while x + run_width < width
-        && !covered[(y * width + x + run_width) as usize]
-        && same_visible_color(color_at(x + run_width, y), color)
-    {
-        run_width += 1;
-    }
-    (run_width, 1)
+    (1, 1)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn largest_rectangle(
+/// ExecuteXX (MULTILAYER 1D): TODO — re-implement from C# ExecuteXX.
+#[allow(dead_code, unused_variables, clippy::too_many_arguments)]
+fn execute_xx(
     x: u32,
     y: u32,
     width: u32,
@@ -1148,32 +1193,22 @@ fn largest_rectangle(
     covered: &[bool],
     color_at: &impl Fn(u32, u32) -> [u8; 4],
 ) -> (u32, u32) {
-    let mut best = (1, 1);
-    let mut max_width = u32::MAX;
-    for rect_y in y..height {
-        let mut row_width = 0;
-        while row_width < max_width
-            && x + row_width < width
-            && !covered[(rect_y * width + x + row_width) as usize]
-            && same_visible_color(color_at(x + row_width, rect_y), color)
-        {
-            row_width += 1;
-        }
-        if row_width < max_width {
-            max_width = row_width;
-        }
-        if max_width == 0 {
-            break;
-        }
-        let candidate = (max_width, rect_y - y + 1);
-        if candidate.0 * candidate.1 > best.0 * best.1 {
-            best = candidate;
-        }
-    }
-    best
+    (0, 0)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// ExecuteXXalt (MULTILAYER 2D): TODO — re-implement from C# ExecuteXXalt.
+#[allow(unused_variables)]
+fn write_xx_alt<W: Write>(
+    image: &image::RgbaImage,
+    settings: &InsertSettings,
+    output: &mut W,
+    progress: &impl Fn(f32, f32),
+    count: &mut u64,
+) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[allow(dead_code, unused_variables, clippy::too_many_arguments)]
 fn longest_one_dimensional_run(
     x: u32,
     y: u32,
@@ -1183,13 +1218,7 @@ fn longest_one_dimensional_run(
     covered: &[bool],
     color_at: &impl Fn(u32, u32) -> [u8; 4],
 ) -> (u32, u32) {
-    let horizontal = horizontal_run(x, y, width, color, covered, color_at);
-    let vertical = vertical_run(x, y, width, height, color, covered, color_at);
-    if horizontal.0 >= vertical.1 {
-        horizontal
-    } else {
-        vertical
-    }
+    (1, 1)
 }
 
 // ---------------------------------------------------------------------------
