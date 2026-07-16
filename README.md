@@ -20,7 +20,8 @@ cargo install wasm-bindgen-cli
 ### Build
 
 ```sh
-./build-web.sh
+cargo build --release --target wasm32-unknown-unknown -p img2pb2-web
+wasm-bindgen --target web --out-dir web\pkg --out-name img2pb2_web target\wasm32-unknown-unknown\release\img2pb2_web.wasm
 ```
 
 ### Serve
