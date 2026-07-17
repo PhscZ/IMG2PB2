@@ -153,7 +153,7 @@ impl Pb2ImgApp {
             x_offset: "0".into(),
             y_offset: "0".into(),
             attach_to: String::new(),
-            draw_in_front: true,
+            draw_in_front: false,
             spawn_shadows: false,
             option: InsertOption::Basic,
             x_progress: 0.0,
