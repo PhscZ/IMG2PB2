@@ -21,7 +21,5 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-// When checking/building the bin crate for wasm32 there is no native entry
-// point — the web app is launched via `img2pb2::WebHandle` in `src/lib.rs`.
 #[cfg(target_arch = "wasm32")]
 fn main() {}

@@ -24,20 +24,15 @@ use rfd::FileDialog;
 #[cfg(target_arch = "wasm32")]
 use std::{cell::RefCell, rc::Rc};
 
-// ---------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------
 
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_VIEWER_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_IMAGE_PIXELS: u64 = 80_000_000;
 
-// ---------------------------------------------------------------------------
 // Public re-exports / entry helpers
-// ---------------------------------------------------------------------------
 
-/// Decode an embedded `.ico` into the RGBA pixels eframe wants for the window
-/// title-bar icon. Native only (web has no window icon).
+// title-bar icon. Native only (web has no window icon).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_icon_data(bytes: &[u8]) -> egui::IconData {
     match image::load_from_memory_with_format(bytes, image::ImageFormat::Ico) {
@@ -58,13 +53,10 @@ pub fn load_icon_data(bytes: &[u8]) -> egui::IconData {
     }
 }
 
-// ---------------------------------------------------------------------------
 // App
-// ---------------------------------------------------------------------------
 
 pub struct Pb2ImgApp {
-    /// Decoded source image, kept in memory so the same buffer feeds the preview
-    /// and the conversion on every platform.
+    // Decoded source image, kept in memory so the same buffer feeds the preview
     image: Option<image::RgbaImage>,
     image_name: String,
     xml_content: String,
@@ -216,7 +208,7 @@ impl Pb2ImgApp {
         self.image.is_some() && !self.xml_name.trim().is_empty() && self.settings().is_ok()
     }
 
-    // -- file selection -----------------------------------------------------
+    // File selection
 
     #[cfg(not(target_arch = "wasm32"))]
     fn select_image(&mut self, ctx: &egui::Context) {
@@ -352,7 +344,7 @@ impl Pb2ImgApp {
         }
     }
 
-    // -- conversion ---------------------------------------------------------
+    // Conversion
 
     #[cfg(not(target_arch = "wasm32"))]
     fn insert_image(&mut self) {
@@ -560,9 +552,7 @@ impl eframe::App for Pb2ImgApp {
     }
 }
 
-// ---------------------------------------------------------------------------
 // UI helpers
-// ---------------------------------------------------------------------------
 
 fn source_files(ui: &mut egui::Ui, app: &mut Pb2ImgApp, ctx: &egui::Context, controls_width: f32) {
     const BUTTON_WIDTH: f32 = 128.0;
@@ -799,9 +789,7 @@ fn load_texture_from_image(ctx: &egui::Context, image: &image::RgbaImage) -> Tex
     )
 }
 
-// ---------------------------------------------------------------------------
-// Conversion core (platform-agnostic)
-// ---------------------------------------------------------------------------
+// Conversion core
 
 #[derive(Clone)]
 struct InsertSettings {
@@ -873,8 +861,7 @@ fn xml_escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Append the converted image into any writer. Returns the number of `<bg>`
-/// objects written. The progress callback receives `(x, y)` in `0.0..=1.0`.
+// Append the converted image into any writer. Returns the number of <bg>s
 fn run_conversion<W: Write>(
     image: &image::RgbaImage,
     settings: &InsertSettings,
@@ -1074,8 +1061,7 @@ fn write_rect<W: Write>(
     let w = rect.width as f64 * settings.pixel_width;
     let h = rect.height as f64 * settings.pixel_height;
 
-    // Material 3 uses raw RGB; all other materials encode half the source RGB
-    // (the PB2 renderer applies a 2x brightness multiplier).
+    // Material 3 uses raw RGB, all other materials encode half the source RGB
     let (c0, c1, c2) = if settings.is_material_3 {
         (rect.color[0], rect.color[1], rect.color[2])
     } else {
@@ -1192,9 +1178,7 @@ fn longest_one_dimensional_run(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Native-only: file viewer + background worker
-// ---------------------------------------------------------------------------
 
 #[cfg(not(target_arch = "wasm32"))]
 enum WorkerMessage {
@@ -1270,9 +1254,7 @@ fn convert_image_in_background(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Web-only: download helper + eframe entry point
-// ---------------------------------------------------------------------------
 
 #[cfg(target_arch = "wasm32")]
 fn download(filename: &str, data: &[u8]) {
