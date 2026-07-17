@@ -127,7 +127,7 @@ impl InsertOption {
 impl Pb2ImgApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut style = (*cc.egui_ctx.style()).clone();
-        style.spacing.item_spacing = Vec2::new(10.0, 10.0);
+        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
         style.visuals.panel_fill = Color32::from_rgb(18, 22, 33);
         style.visuals.extreme_bg_color = Color32::from_rgb(27, 33, 48);
         style.visuals.faint_bg_color = Color32::from_rgb(24, 29, 43);
@@ -484,12 +484,12 @@ impl eframe::App for Pb2ImgApp {
             .frame(
                 Frame::none()
                     .fill(Color32::from_rgb(18, 22, 33))
-                    .inner_margin(Vec2::new(20.0, 16.0)),
+                    .inner_margin(Vec2::new(16.0, 12.0)),
             )
             .show(ctx, |ui| {
-                const MIN_PREVIEW_SIZE: f32 = 500.0;
-                const MIN_CONTROLS_WIDTH: f32 = 550.0;
-                const PREVIEW_HEADER_HEIGHT: f32 = 18.0;
+                const MIN_PREVIEW_SIZE: f32 = 400.0;
+                const MIN_CONTROLS_WIDTH: f32 = 480.0;
+                const PREVIEW_HEADER_HEIGHT: f32 = 20.0;
                 const COLUMN_GAP: f32 = 10.0;
                 let preview_size = (ui.available_height() - PREVIEW_HEADER_HEIGHT)
                     .min(ui.available_width() - MIN_CONTROLS_WIDTH - COLUMN_GAP)
@@ -503,24 +503,24 @@ impl eframe::App for Pb2ImgApp {
                         |ui| {
                             ui.heading(
                                 RichText::new("IMG2PB2")
-                                    .size(27.0)
+                                    .size(22.0)
                                     .strong()
                                     .color(Color32::from_rgb(123, 181, 255)),
                             );
-                            ui.add_space(5.0);
+                            ui.add_space(3.0);
                             source_files(ui, self, ctx, controls_width);
-                            ui.add_space(16.0);
+                            ui.add_space(10.0);
                             placement_controls(ui, self, controls_width);
-                            ui.add_space(16.0);
+                            ui.add_space(10.0);
                             option_controls(ui, self, controls_width);
-                            ui.add_space(16.0);
+                            ui.add_space(10.0);
                             ui.horizontal(|ui| {
                                 let can_insert =
                                     !self.processing && self.required_fields_are_defined();
                                 if ui
                                     .add_enabled_ui(can_insert, |ui| {
                                         ui.add_sized(
-                                            [150.0, 38.0],
+                                            [130.0, 32.0],
                                             dark_button(
                                                 RichText::new("INSERT IMAGE")
                                                     .strong()
@@ -549,7 +549,7 @@ impl eframe::App for Pb2ImgApp {
                                     .color(Color32::from_rgb(161, 188, 222)),
                                 );
                             });
-                            ui.add_space(10.0);
+                            ui.add_space(6.0);
                             xml_content_viewer(ui, &mut self.xml_content, controls_width);
                         },
                     );
@@ -571,7 +571,7 @@ fn source_files(ui: &mut egui::Ui, app: &mut Pb2ImgApp, ctx: &egui::Context, con
     ui.horizontal(|ui| {
         if ui
             .add_sized(
-                [BUTTON_WIDTH, 34.0],
+                [BUTTON_WIDTH, 28.0],
                 dark_button(RichText::new("Select image").color(label_color())),
             )
             .clicked()
@@ -579,14 +579,14 @@ fn source_files(ui: &mut egui::Ui, app: &mut Pb2ImgApp, ctx: &egui::Context, con
             app.select_image(ctx);
         }
         ui.add_sized(
-            [path_width, 34.0],
+            [path_width, 28.0],
             dark_text_edit(&mut app.image_name).hint_text("No image selected"),
         );
     });
     ui.horizontal(|ui| {
         if ui
             .add_sized(
-                [BUTTON_WIDTH, 34.0],
+                [BUTTON_WIDTH, 28.0],
                 dark_button(RichText::new("Select PB2 XML").color(label_color())),
             )
             .clicked()
@@ -594,7 +594,7 @@ fn source_files(ui: &mut egui::Ui, app: &mut Pb2ImgApp, ctx: &egui::Context, con
             app.select_xml(ctx);
         }
         ui.add_sized(
-            [path_width, 34.0],
+            [path_width, 28.0],
             dark_text_edit(&mut app.xml_name).hint_text("No XML or text file selected"),
         );
     });
@@ -607,7 +607,7 @@ fn placement_controls(ui: &mut egui::Ui, app: &mut Pb2ImgApp, controls_width: f3
     section_title(ui, "PLACEMENT");
     egui::Grid::new("placement_grid")
         .num_columns(2)
-        .spacing([COLUMN_GAP, 12.0])
+        .spacing([COLUMN_GAP, 8.0])
         .show(ui, |ui| {
             placement_field(ui, "Pixel X size", &mut app.pixel_x_size, field_width);
             placement_field(ui, "Pixel Y size", &mut app.pixel_y_size, field_width);
@@ -627,7 +627,7 @@ fn placement_controls(ui: &mut egui::Ui, app: &mut Pb2ImgApp, controls_width: f3
 fn placement_field(ui: &mut egui::Ui, label: &str, value: &mut String, field_width: f32) {
     ui.vertical(|ui| {
         ui.label(RichText::new(label).color(label_color()));
-        ui.add_sized([field_width, 26.0], dark_text_edit(value));
+        ui.add_sized([field_width, 22.0], dark_text_edit(value));
     });
 }
 
@@ -641,7 +641,7 @@ fn material_field(ui: &mut egui::Ui, value: &mut String, field_width: f32) {
                     .color(Color32::from_rgb(142, 165, 198)),
             );
         });
-        ui.add_sized([field_width, 26.0], dark_text_edit(value));
+        ui.add_sized([field_width, 22.0], dark_text_edit(value));
     });
 }
 
@@ -663,7 +663,7 @@ fn dark_text_edit(value: &mut String) -> egui::TextEdit<'_> {
 }
 
 fn xml_content_viewer(ui: &mut egui::Ui, content: &mut String, controls_width: f32) {
-    let viewer_height = ui.available_height().max(80.0);
+    let viewer_height = ui.available_height().max(60.0);
     ui.allocate_ui(Vec2::new(controls_width, viewer_height), |ui| {
         Frame::none()
             .fill(Color32::from_rgb(22, 28, 42))
@@ -721,9 +721,9 @@ fn option_controls(ui: &mut egui::Ui, app: &mut Pb2ImgApp, controls_width: f32) 
             RichText::new("SPAWN SHADOWS").color(label_color()),
         );
     });
-    ui.add_space(8.0);
+    ui.add_space(4.0);
     ui.allocate_ui_with_layout(
-        Vec2::new(controls_width, 30.0),
+        Vec2::new(controls_width, 24.0),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             const BAR_GAP: f32 = 4.0;
@@ -745,7 +745,7 @@ fn option_controls(ui: &mut egui::Ui, app: &mut Pb2ImgApp, controls_width: f32) 
 }
 
 fn preview_panel(ui: &mut egui::Ui, app: &Pb2ImgApp, preview_size: f32) {
-    const FRAME_MARGIN: f32 = 14.0;
+    const FRAME_MARGIN: f32 = 10.0;
     const FRAME_STROKE: f32 = 1.0;
     let canvas_size = Vec2::splat(preview_size - 2.0 * (FRAME_MARGIN + FRAME_STROKE));
 
@@ -770,7 +770,7 @@ fn preview_panel(ui: &mut egui::Ui, app: &Pb2ImgApp, preview_size: f32) {
                         } else {
                             ui.label(
                                 RichText::new("Your selected image\nwill appear here")
-                                    .size(17.0)
+                                    .size(14.0)
                                     .color(Color32::GRAY),
                             );
                         }
